@@ -1,0 +1,193 @@
+import log4js from '../lib/log';
+import _ from 'lodash';
+import {I18N} from '../locales';
+const Excel = require('exceljs');
+const { Transform } = require('stream');
+
+const log = log4js.getLogger('history');
+
+const isCorrectId = id => /^[0-9a-zA-Z-_]{1,32}$/.test(id);
+
+const resolveData = (sourcedata) => {
+  const locale = global.locale;
+  const excelData = {};
+
+  if (sourcedata.length === 0) {
+    excelData.worksheetColums = [];
+    excelData.worksheetRows = [];
+    log.info('excel data is empty.');
+    return excelData;
+  }
+
+  const worksheetColums = [
+    // { header: 'id', key: 'id', width: 20, style: { alignment: { vertical: 'middle', horizontal: 'center' } } },
+    { header: I18N[locale]['NAME'], key: 'name', width: 20, style: { alignment: { vertical: 'middle', horizontal: 'center' } } },
+    { header: I18N[locale]['ACCESS_TIMES'], key: 'count', width: 20, style: { alignment: { vertical: 'middle', horizontal: 'center' } } }];
+
+  excelData.worksheetColums = worksheetColums || [];
+
+  excelData.worksheetRows = [...sourcedata];
+  return excelData;
+};
+
+const formatDateNum = (number) => {
+  if (Number.isInteger(number)) {
+    return number < 10 ? ('0' + number) : '' + number;
+  }
+  return '00';
+};
+
+const getFileName = (title) => {
+  const now = new Date();
+  let filenameTime = '' + now.getFullYear() + formatDateNum(now.getMonth() + 1) + formatDateNum(now.getDate());
+  filenameTime += '' + formatDateNum(now.getHours()) + formatDateNum(now.getMinutes()) + formatDateNum(now.getSeconds());
+  const filename = `${title}_${filenameTime}.xlsx`;
+  return filename;
+};
+
+// 写excel文件
+const getExcelFile = (excelData, title) =>
+  new Promise((reslove) => {
+    const workbook = new Excel.Workbook();
+    workbook.views = [
+      {
+        x: 0, y: 0, width: 10000, height: 20000,
+        firstSheet: 0, activeTab: 1, visibility: 'visible'
+      }
+    ];
+    const fileName = getFileName(title);
+    const ws = workbook.addWorksheet('mysheet');
+    ws.columns = excelData.worksheetColums || [];
+    ws.addRows(excelData.worksheetRows);
+    log.info(`filename is ${fileName}`);
+    const file = {};
+    const myTransform = new Transform({
+      writableObjectMode: true,
+      transform(chunk, encoding, callback) {
+        callback(null, chunk);
+      }
+    });
+    let str = '';
+    myTransform.on('data', chunk => {
+      str += chunk.toString('base64');
+    });
+    myTransform.on('end', () => {
+      file.name = fileName;
+      file.content = str;
+      log.info(`transform end.file.name is ${file.name}`);
+      reslove(file);
+    });
+    return workbook.xlsx.write(myTransform);
+  });
+
+function main({app, query}) {
+  const locale = global.locale;
+
+  // 查询运维地图类型
+  app.get('/rest/mounionoperationservice/v1/historys', (req, res) => {
+    const sql = 'select t1.id, t1.name, 0 as type, t.count from t_om_system t1, (select type_id, count(1) as count from t_visit_history where type = 0 group by type_id order by count desc) t where t1.id = t.type_id union select t2.id, t2.name, 1 as type, t.count from t_operation_map_info t2, (select type_id, count(1) as count from t_visit_history where type = 1 group by type_id order by count desc) t where t2.id = t.type_id union select t3.id, t3.name, 2 as type, t.count from t_operation_sense t3, (select type_id, count(1) as count from t_visit_history where type = 2 group by type_id order by count desc) t where t3.id = t.type_id;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET visit history error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        const newResult = {
+          omLink: [],
+          map: [],
+          sense: []
+        };
+        result.forEach((item) => {
+          if (item.type === 0) {
+            newResult.omLink.push(item);
+          } else if (item.type === 1) {
+            newResult.map.push(item);
+          } else if (item.type === 2) {
+            newResult.sense.push(item);
+          }
+        });
+
+        log.info('GET visit history successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: newResult });
+      }
+    });
+  });
+
+  // 创建运维地图类型
+  app.post('/rest/mounionoperationservice/v1/history', (req, res) => {
+    log.info('create visit history begin');
+    const history = req.body;
+    const operationId = history.operationId === undefined ? '' : history.operationId;
+
+    if (!isCorrectId(history.typeId)) {
+      log.error(`create visit history typeId ${history.typeId} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationId !== '' && !isCorrectId(operationId)) {
+      log.error(`create visit history operation ${operationId} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (history.type !== 0 && history.type !== '0' && history.type !== 1 && history.type !== '1' && history.type !== 2 && history.type !== '2') {
+      log.error(`create visit history type ${history.type} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'insert t_visit_history(type, type_id, operation_id, user_name, visit_time) values(?, ?, ?, ?, now());';
+    query(sql, [history.type, history.typeId, operationId, history.user], (err) => {
+      if (err) {
+        log.error(`create visit history type error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'create visit history info error!'
+        });
+      } else {
+        log.info('create visit history end');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: {} });
+      }
+    });
+  });
+
+  // 根据ID导出运维历史
+  app.get('/rest/mounionoperationservice/v1/export/history/:type', (req, res) => {
+    const type = req.params.type;
+    log.info(`export visit history by type begin. type is ${type}`);
+    let title = '';
+    let sql = '';
+    if (type === 0 || type === '0') {
+      sql = 'select t1.id, t1.name, 0 as type, t.count from t_om_system t1, (select type_id, count(1) as count from t_visit_history where type = 0 group by type_id order by count desc) t where t1.id = t.type_id';
+      title = I18N[locale]['QUICK_LINKS_STATISTICS'];
+    } else if (type === 1 || type === '1') {
+      sql = 'select t2.id, t2.name, 1 as type, t.count from t_operation_map_info t2, (select type_id, count(1) as count from t_visit_history where type = 1 group by type_id order by count desc) t where t2.id = t.type_id';
+      title = I18N[locale]['OM_MAP_STATISTICS'];
+    } else if (type === 2 || type === '2') {
+      sql = 'select t3.id, t3.name, 2 as type, t.count from t_operation_sense t3, (select type_id, count(1) as count from t_visit_history where type = 2 group by type_id order by count desc) t where t3.id = t.type_id';
+      title = I18N[locale]['COMMON_TASK_STATISTICS'];
+    } else {
+      log.error(`export visit history ${type} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+    query(sql, [])
+    .then(formatData => resolveData(formatData))
+    .then(excelData => getExcelFile(excelData, title))
+    .then(file => res.status(200).send({fileName: file.name, content: file.content}))
+    .catch(err => {
+      if (err.message === 'OC.000003') {
+        log.error('relate moreport is not find, export report failed');
+        res.status(500).send({ resultCode: 'OC.000003', resultData: {} });
+      } else {
+        log.error(`export data is failed, err is ${err}`);
+        res.status(500).send({ resultCode: 'OC.000001', resultData: {} });
+      }
+    });
+  });
+}
+
+module.exports = main;

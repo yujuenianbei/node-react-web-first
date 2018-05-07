@@ -1,0 +1,987 @@
+import log4js from '../lib/log';
+import _ from 'lodash';
+import uuidv4 from 'uuid/v4';
+
+const log = log4js.getLogger('operation');
+
+// 判断ID是否合法
+const isCorrectId = id => /^[0-9a-zA-Z-_]{1,32}$/.test(id);
+const isCorrectName = id => /(^[\u4E00-\u9FA5A-Za-z0-9_\-()\s]{2,64})+$/.test(id);
+const isCorrectDesc = id => /(^[\u4E00-\u9FA5A-Za-z0-9_\-()\s]{0,256})+$/.test(id);
+
+// eslint-disable-next-line no-useless-escape
+const isCorrectURL = id => /^http(s?)\:\/\/[0-9a-zA-Z]([-.\w]*[0-9a-zA-Z])*(:(0-9)*)*(\/?)([a-zA-Z0-9\-\.\?\,\'\/\\\+&amp;%\$#_]*)?/.test(id);
+
+function main({app, query}) {
+  const locale = global.locale === 'zh_CN' ? 'zh-cn' : 'en-us';
+  // 判断Service_OM中是否有数据
+  app.post('/rest/mounionoperationservice/v1/omState', (req, res) => {
+    const body = req.body
+    const { search } = body;
+
+    if (!isCorrectId(search)) {
+      log.error(`POST omState ${search} failed, search is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'select t.id from t_om_system t where t.id = ?';
+    query(sql, [search], (err, result) => {
+      if (err) {
+        log.error(`POST omState error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        if (result.length > 0) {
+          res.status(200).send({ resultCode: 'OC.000000', resultData: 'true' });
+        } else {
+          res.status(200).send({ resultCode: 'OC.000000', resultData: 'false' });
+        }
+        log.info('POST omState successfully');
+      }
+    });
+  });
+  // 查询OM系统列表
+  app.get('/rest/mounionoperationservice/v1/om', (req, res) => {
+    const sql = 'select t.id, t1.system_id, t1.url, t1.region, t.name, t.is_global as isGlobal from t_om_system t, t_om_system_info t1 where t1.system_id = t.id;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET om info error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        const tempResult = {};
+        result.forEach((item) => {
+          if (tempResult[item.id] !== undefined) {
+            tempResult[item.id].url_list.push({
+              url: item.url,
+              regionId: item.region
+            });
+          } else {
+            tempResult[item.id] = {
+              id: item.id,
+              system_id: item.system_id,
+              name: item.name,
+              isGlobal: item.isGlobal,
+              url_list: [
+                {
+                  url: item.url,
+                  regionId: item.region
+                }
+              ]
+            };
+          }
+        });
+
+        const newResult = [];
+        _.forEach(tempResult, function (value) {
+          newResult.push(value);
+        });
+
+        log.info('GET om info successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: newResult});
+      }
+    });
+  });
+
+  // OM部件注册接口
+  app.post('/rest/mounionoperationservice/v1/om', (req, res) => {
+    const om = req.body;
+    const { id, name, url, operations } = om;
+    const omInfoId = uuidv4().replace(/-/g, '');
+    const tasks = [];
+    const region = om.region_id === undefined ? '' : om.region_id;
+    const isGlobal = region === '' ? 1 : 0;
+
+    // OM系统
+    const omSQL = 'insert into `t_om_system` (`id`, `name`, `is_global`, `is_show`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now()) ON DUPLICATE KEY UPDATE `name` = values(name), `is_global` = values(is_global), `is_show` = values(is_show), `modify_time` = values(modify_time);';
+    tasks.push(
+      query(omSQL, [id, name[locale], isGlobal, 1])
+      .then(() => {
+        log.info('create or update om system success.');
+      })
+      .catch(err => {
+        log.error(`create or update om system failed, err is ${err}`);
+        throw new Error(err);
+      }));
+
+    // OM系统URL
+    const omInfoSQL = 'insert into `t_om_system_info` (`id`, `system_id`, `region`, `url`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now()) ON DUPLICATE KEY UPDATE `system_id` = values(system_id) , `url` = values(url) , `modify_time` = values(modify_time)';
+    tasks.push(
+      query(omInfoSQL, [omInfoId, id, region, url])
+      .then(() => {
+        log.info('create or update om system info success.');
+      })
+      .catch(err => {
+        log.error(`create or update om system info failed, err is ${err}`);
+        throw new Error(err);
+      }));
+
+    operations.forEach((operation) => {
+      // OM操作
+      const operationSQL = 'insert into `t_operation` (`id`, `system_id`, `name`, `description`, `is_global`, `type`, `create_time`, `modify_time`) values (?, ?, ?, ?, ?, ?, now(), now()) ON DUPLICATE KEY UPDATE `name` = values(name) , description = values(description) , type = values(type) , is_global = values(is_global) , modify_time = values(modify_time)';
+      tasks.push(
+        query(operationSQL, [operation.id, id, operation.name[locale], operation.desc[locale], isGlobal, operation.type])
+        .then(() => {
+          log.info('create or update om system operation success.');
+        })
+        .catch(err => {
+          log.error(`create or update om system operation failed, err is ${err}`);
+          throw new Error(err);
+        }));
+
+      // OM操作URL
+      const operationInfoSQL = 'insert into `t_operation_info` (`id`, `operation_id`, `region`, `url`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now()) ON DUPLICATE KEY UPDATE `url` = values(url) , `modify_time` = values(modify_time);';
+      tasks.push(
+        query(operationInfoSQL, [uuidv4().replace(/-/g, ''), operation.id, region, operation.url])
+        .then(() => {
+          log.info('create or update om system operation info success.');
+        })
+        .catch(err => {
+          log.error(`create or update om system operation info failed, err is ${err}`);
+          throw new Error(err);
+        }));
+    });
+
+    Promise.all(tasks).then(() => {
+      log.info('om register success!');
+      res.status(200).send({ resultCode: 'OC.000000', resultData: {}});
+    })
+    .catch(err => {
+      log.error(`om register failed, err is ${err}`);
+      res.status(200).send({ resultCode: 'OC.000001', resultData: {}});
+    });
+  });
+
+  // 页面创建OM接口
+  app.post('/rest/mounionoperationservice/v1/omlink', (req, res) => {
+    const om = req.body;
+    const { id, name } = om;
+    const urlList = om.url_list;
+    const tasks = [];
+    const locale = 'zh-cn';
+    const isGlobal = om.isGlobal;
+
+    if (!isCorrectId(id)) {
+      log.error(`create omlink id ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(name[locale])) {
+      log.error(`create omlink name ${name[locale]} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (isGlobal === 'true' || isGlobal === true) {
+      if (urlList.length !== 1 || !!urlList[0].regionId) {
+        log.error('create omlink failed, global link do not have region info.');
+        res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+        return;
+      }
+    } else if (isGlobal === 'false' || isGlobal === false) {
+      if (urlList.length === 0) {
+        log.error('create omlink failed, global link do not have region info.');
+        res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+        return;
+      }
+    } else {
+      log.error(`create omlink isglobal ${isGlobal} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    let isUrlValidated = true;
+    urlList.forEach((item) => {
+      if (!isCorrectURL(item.url)) {
+        log.error(`create omlink url ${item.url} failed, param is error.`);
+        isUrlValidated = false;
+        return;
+      }
+    });
+
+    if (!isUrlValidated) {
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    // OM系统
+    const omSQL = 'insert into `t_om_system` (`id`, `name`, `is_global`, `is_show`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now());';
+    tasks.push(
+      query(omSQL, [id, name[locale], isGlobal, 1])
+      .then(() => {
+        log.info('create om system success.');
+      })
+      .catch(err => {
+        log.error(`create om system failed, err is ${err}`);
+        throw new Error(err);
+      }));
+
+    urlList.forEach((item) => {
+      // OM系统URL
+      const omInfoSQL = 'insert into `t_om_system_info` (`id`, `system_id`, `region`, `url`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now());';
+      const omInfoId = uuidv4().replace(/-/g, '');
+      const region = item.regionId === undefined ? '' : item.regionId;
+      tasks.push(
+        query(omInfoSQL, [omInfoId, id, region, item.url])
+        .then(() => {
+          log.info('create or update om system info success.');
+        })
+        .catch(err => {
+          log.error(`create or update om system info failed, err is ${err}`);
+          throw new Error(err);
+        }));
+    });
+
+    Promise.all(tasks).then(() => {
+      log.info('create om quick link success!');
+      res.status(200).send({ resultCode: 'OC.000000', resultData: {}});
+    })
+    .catch(err => {
+      log.error(`create om quick link failed, err is ${err}`);
+      res.status(200).send({ resultCode: 'OC.000001', resultData: {}});
+    });
+  });
+
+  // 页面更新OM接口
+  app.put('/rest/mounionoperationservice/v1/omlink/:id', (req, res) => {
+    const id = req.params.id;
+    const om = req.body;
+    const { name } = om;
+    const urlList = om.url_list;
+    const tasks = [];
+    const locale = 'zh-cn';
+    const isGlobal = om.isGlobal;
+
+    if (!isCorrectId(id)) {
+      log.error(`update omlink id ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(name[locale])) {
+      log.error(`update omlink name ${name[locale]} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (isGlobal === 'true' || isGlobal === true) {
+      if (urlList.length !== 1 || !!urlList[0].regionId) {
+        log.error('update omlink failed, global link do not have region info.');
+        res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+        return;
+      }
+    } else if (isGlobal === 'false' || isGlobal === false) {
+      if (urlList.length === 0) {
+        log.error('update omlink failed, global link do not have region info.');
+        res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+        return;
+      }
+    } else {
+      log.error(`update omlink isglobal ${isGlobal} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    let isUrlValidated = true;
+    urlList.forEach((item) => {
+      if (!isCorrectURL(item.url)) {
+        log.error(`update omlink url ${item.url} failed, param is error.`);
+        isUrlValidated = false;
+        return;
+      }
+    });
+
+    if (!isUrlValidated) {
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    // 删除OM关联链接
+    const omInfoSQL = 'delete from `t_om_system_info` where system_id = ?';
+    query(omInfoSQL, [id]).then(() => {
+        // OM系统
+      const omSQL = 'update `t_om_system` set name = ?, is_global = ?, modify_time = now() where id = ?';
+      tasks.push(
+        query(omSQL, [om.name[locale], isGlobal, id])
+        .then(() => {
+          log.info('update om system success.');
+        })
+        .catch(err => {
+          log.error(`update om system failed, err is ${err}`);
+          throw new Error(err);
+        }));
+
+      urlList.forEach((item) => {
+        // OM系统URL
+        const omInfoSQL = 'insert into `t_om_system_info` (`id`, `system_id`, `region`, `url`, `create_time`, `modify_time`) values (?, ?, ?, ?, now(), now());';
+        const omInfoId = uuidv4().replace(/-/g, '');
+        tasks.push(
+          query(omInfoSQL, [omInfoId, id, item.regionId, item.url])
+          .then(() => {
+            log.info('create or update om system info success.');
+          })
+          .catch(err => {
+            log.error(`create or update om system info failed, err is ${err}`);
+            throw new Error(err);
+          }));
+      });
+
+      Promise.all(tasks).then(() => {
+        log.info('create om quick link success!');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: {}});
+      })
+      .catch(err => {
+        log.error(`create om quick link failed, err is ${err}`);
+        res.status(200).send({ resultCode: 'OC.000001', resultData: {}});
+      });
+    }).catch((err) => {
+      log.error(`update om system failed, err is ${err}`);
+      res.status(200).send({ resultCode: 'OC.000001', resultData: {} });
+    });
+  });
+
+  // 页面删除OM接口
+  app.delete('/rest/mounionoperationservice/v1/omlink/:id', (req, res) => {
+    log.info('delete om link begin');
+    const id = req.params.id;
+    const tasks = [];
+    log.info(`om link id is ${id}`);
+
+    if (!isCorrectId(id)) {
+      log.error(`delete om link ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    // OM系统
+    const omSQL = 'update `t_om_system` set is_show = 0 where id = ?';
+    tasks.push(
+      query(omSQL, [id])
+      .then(() => {
+        log.info('delete om system success.');
+      })
+      .catch(err => {
+        log.error(`delete om system failed, err is ${err}`);
+        throw new Error(err);
+      }));
+
+    // 删除OM关联链接
+    const omInfoSQL = 'delete from `t_om_system_info` where system_id = ?';
+    tasks.push(
+      query(omInfoSQL, [id])
+      .then(() => {
+        log.info('delete om system info success.');
+      })
+      .catch(err => {
+        log.error(`delete om system info failed, err is ${err}`);
+        throw new Error(err);
+      }));
+
+    Promise.all(tasks).then(() => {
+      log.info('delete om quick link success!');
+      res.status(200).send({ resultCode: 'OC.000000', resultData: {}});
+    })
+    .catch(err => {
+      log.error(`delete om quick link failed, err is ${err}`);
+      res.status(200).send({ resultCode: 'OC.000001', resultData: {}});
+    });
+  });
+
+  // 查询类型列表
+  app.get('/rest/mounionoperationservice/v1/operation-types', (req, res) => {
+    const sql = 'select id, name from t_operation_type;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET operation type error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        log.info('GET operation type successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 查询运维场景
+  app.get('/rest/mounionoperationservice/v1/operation-senses', (req, res) => {
+    const sql = 'select id, name, description, operation_order as operationList, icon from t_operation_sense where is_show = 1;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET operation sense error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        log.info('GET operation sense successfully');
+        const newResult = [];
+        result.forEach((item) => {
+          newResult.push({
+            id: item.id,
+            name: item.name,
+            desc: item.description,
+            icon: item.icon,
+            operationList: item.operationList.split(',')
+          });
+        });
+
+        res.status(200).send({ resultCode: 'OC.000000', resultData: newResult });
+      }
+    });
+  });
+
+  // 页面创建运维场景
+  app.post('/rest/mounionoperationservice/v1/operation-sense', (req, res) => {
+    log.info('create operation sense begin');
+    const operationSense = req.body;
+    const operationOrder = (operationSense.operationList === undefined || operationSense.operationList.length <= 0) ? '' : operationSense.operationList.join(',');
+
+    if (!isCorrectId(operationSense.id)) {
+      log.error(`create operation sense id ${operationSense.id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(operationSense.name)) {
+      log.error(`create operation sense id ${operationSense.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.desc !== '' && operationSense.desc !== undefined && !isCorrectDesc(operationSense.desc)) {
+      log.error(`create operation sense desc ${operationSense.desc} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.icon.length > 5000) {
+      log.error('create operation sense failed, icon error.');
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.operationList.length > 30) {
+      log.error('create operation sense failed, operationList too much error.');
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    let isOperationValidate = true;
+    operationSense.operationList.forEach((operation) => {
+      if (!isCorrectId(operation)) {
+        log.error(`create operation sense operation ${operation} failed, param is error.`);
+        isOperationValidate = false;
+      }
+    });
+
+    if (!isOperationValidate) {
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'insert t_operation_sense(id, name, description, operation_order, is_show, icon, create_time, modify_time) values(?, ?, ?, ?, 1, ?, now(), now());';
+    query(sql, [operationSense.id, operationSense.name, operationSense.desc, operationOrder, operationSense.icon], (err, result) => {
+      if (err) {
+        log.error(`create operation sense error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'create operation sense error!'
+        });
+      } else {
+        log.info('create operation sense successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 页面更新运维场景
+  app.put('/rest/mounionoperationservice/v1/operation-sense/:id', (req, res) => {
+    log.info('update operation sense begin');
+    const id = req.params.id;
+
+    if (!isCorrectId(id)) {
+      log.error(`update operation sense ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const operationSense = req.body;
+    const operationOrder = (operationSense.operationList === undefined || operationSense.operationList.length <= 0) ? '' : operationSense.operationList.join(',');
+
+    if (!isCorrectName(operationSense.name)) {
+      log.error(`update operation sense id ${operationSense.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.desc !== '' && operationSense.desc !== undefined && !isCorrectDesc(operationSense.desc)) {
+      log.error(`update operation sense desc ${operationSense.desc} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.icon.length > 5000) {
+      log.error('update operation sense failed, icon error.');
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (operationSense.operationList.length > 30) {
+      log.error('update operation sense failed, operationList too much error.');
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    let isOperationValidate = true;
+    operationSense.operationList.forEach((operation) => {
+      if (!isCorrectId(operation)) {
+        log.error(`update operation sense operation ${operation} failed, param is error.`);
+        isOperationValidate = false;
+      }
+    });
+
+    if (!isOperationValidate) {
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'update t_operation_sense set name = ?, description = ?, operation_order = ?, icon = ? where id = ?;';
+    query(sql, [operationSense.name, operationSense.desc, operationOrder, operationSense.icon, id], (err, result) => {
+      if (err) {
+        log.error(`update operation sense error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'update operation sense error!'
+        });
+      } else {
+        log.info('update operation sense successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 页面删除运维场景
+  app.delete('/rest/mounionoperationservice/v1/operation-sense/:id', (req, res) => {
+    log.info('delete operation sense begin');
+    const id = req.params.id;
+    log.info(`delete operation sense id is ${id}`);
+
+    if (!isCorrectId(id)) {
+      log.error(`delete operation sense ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'update t_operation_sense set is_show = 0 where id = ?;';
+    query(sql, [id], (err, result) => {
+      if (err) {
+        log.error(`delete operation sense error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'delete operation sense error!'
+        });
+      } else {
+        log.info('delete operation sense successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 查询运维地图类型
+  app.get('/rest/mounionoperationservice/v1/operation-map-types', (req, res) => {
+    const sql = 'select id, name, level, parent, icon from t_operation_map_type where status = 1 order by level, create_time;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET operation type error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        const tempResult = {};
+        result.forEach((item) => {
+          if (!!item.parent && tempResult[item.parent] !== undefined) {
+            tempResult[item.parent].subType.push({
+              id: item.id,
+              name: item.name,
+              level: item.level,
+              parent: item.parent,
+              icon: item.icon
+            });
+          } else {
+            tempResult[item.id] = {
+              id: item.id,
+              name: item.name,
+              level: item.level,
+              parent: item.parent,
+              icon: item.icon,
+              subType: [
+              ]
+            };
+          }
+        });
+
+        const newResult = [];
+        _.forEach(tempResult, function (value) {
+          newResult.push(value);
+        });
+
+        log.info('GET operation type successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: newResult});
+      }
+    });
+  });
+
+  // 创建运维地图类型
+  app.post('/rest/mounionoperationservice/v1/operation-map-type', (req, res) => {
+    log.info('create operation map type begin');
+    const mapType = req.body;
+    const icon = (mapType.level === 1 || mapType.level === '1') ? '' : 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACUAAAAkCAYAAAAOwvOmAAAACXBIWXMAAAsSAAALEgHS3X78AAAAqElEQVRYw+3WsQ3DIBCF4d9R+rSUHiEjeBBq2jCCs0HSUrNINsgILmk9AWkoUsSNsWLLfpScdPoEdwdNzpmtrRMbXEIJJZRQQgl1NNS5NkFytgc8cClbL8CbEN9zczY1X5fk7AO4/QiNwNWEOPz1+pKz7QSIcmr9GjXVVsaP031DZXx5VCni50R4XKumMCF64F4QfI2Ebm7nVY8EPTNCCSWUUEIJtWPUB347JK4nnkJUAAAAAElFTkSuQmCC';
+    const parent = (mapType.level === 1 || mapType.level === '1') ? '' : mapType.parent;
+
+    if (!isCorrectId(mapType.id)) {
+      log.error(`create operation map type ${mapType.id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(mapType.name)) {
+      log.error(`create operation map type ${mapType.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (mapType.level === 1 || mapType.level === '1') {
+      log.info('create operation map type level 1');
+    } else if (mapType.level === 2 || mapType.level === '2') {
+      log.info('create operation map type level 2');
+      if (!isCorrectId(mapType.parent)) {
+        log.error(`create operation map type ${mapType.parent} failed, param is error.`);
+        res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+        return;
+      }
+    } else {
+      log.error(`create operation map type ${mapType.level} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'insert t_operation_map_type(id, name, level, parent, status, icon, create_time, modify_time) values(?, ?, ?, ?, ?, ?, now(), now());';
+    query(sql, [mapType.id, mapType.name, mapType.level, parent, 1, icon], (err, result) => {
+      if (err) {
+        log.error(`create operation map type error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'create operation map info error!'
+        });
+      } else {
+        log.info('create operation map type successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 更新运维地图类型
+  app.put('/rest/mounionoperationservice/v1/operation-map-type/:id', (req, res) => {
+    log.info('update operation map type begin');
+    const mapType = req.body;
+    const id = req.params.id;
+
+    if (!isCorrectId(id)) {
+      log.error(`update operation map type ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(mapType.name)) {
+      log.error(`update operation map type ${mapType.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'update t_operation_map_type set name=?,modify_time=now() where id=?;';
+    query(sql, [mapType.name, id], (err, result) => {
+      if (err) {
+        log.error(`update operation map type error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'update operation map type error!'
+        });
+      } else {
+        log.info('update operation map type successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 删除运维地图类型
+  app.delete('/rest/mounionoperationservice/v1/operation-map-type/:id', (req, res) => {
+    log.info('delete operation type begin');
+    const id = req.params.id;
+    log.info(`delete operation type id is ${id}`);
+
+    if (!isCorrectId(id)) {
+      log.error(`delete operation type ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const subTypeOrLinkCount = 'select count(1) as count from (select t1.id from t_operation_map_info t1 where t1.type = ? and t1.status = 1 union select t2.id from t_operation_map_type t2 where t2.parent = ? and t2.status = 1) t3';
+    query(subTypeOrLinkCount, [id, id]).then(result => {
+      if (result && result[0]['count'] === 0) {
+        const updateSql = 'update t_operation_map_type set status=0 where id=?;';
+        query(updateSql, [id], (err, result) => {
+          if (err) {
+            log.error(`delete operation type error ${err}`);
+            res.status(200).send({
+              resultCode: 'OC.000001',
+              resultData: 'query error!'
+            });
+          } else {
+            log.info('delete operation type successfully');
+            res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+          }
+        });
+      } else {
+        log.error('delete operation type error, subtype or operation info exist');
+        res.status(200).send({ resultCode: 'OC.000001', resultData: {} });
+      }
+    }).catch((err) => {
+      log.error(`delete operation type error, err is ${err}`);
+      res.status(200).send({ resultCode: 'OC.000001', resultData: {} });
+    });
+  });
+
+  // 查询运维地图详情
+  app.get('/rest/mounionoperationservice/v1/operation-map-infos', (req, res) => {
+    const sql = 'select id, name, url, type from t_operation_map_info where status = 1;';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET operation map info error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        log.info('GET operation map info successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 创建运维地图详情
+  app.post('/rest/mounionoperationservice/v1/operation-map-info', (req, res) => {
+    log.info('create operation map info begin');
+    const mapInfo = req.body;
+
+    if (!isCorrectId(mapInfo.id)) {
+      log.error(`create operation map info ${mapInfo.id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(mapInfo.name)) {
+      log.error(`create operation map info ${mapInfo.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectURL(mapInfo.url)) {
+      log.error(`create operation map info ${mapInfo.url} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectId(mapInfo.type)) {
+      log.error(`create operation map info ${mapInfo.type} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'insert t_operation_map_info(id, name, url, type, status, create_time, modify_time) values(?, ?, ?, ?, ?, now(), now());';
+    query(sql, [mapInfo.id, mapInfo.name, mapInfo.url, mapInfo.type, 1], (err, result) => {
+      if (err) {
+        log.error(`create operation map info error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'create operation map info error!'
+        });
+      } else {
+        log.info('create operation map info successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 更新运维地图详情
+  app.put('/rest/mounionoperationservice/v1/operation-map-info/:id', (req, res) => {
+    log.info('update operation map info begin');
+    const mapInfo = req.body;
+    const id = req.params.id;
+
+    if (!isCorrectId(id)) {
+      log.error(`update operation map info ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectName(mapInfo.name)) {
+      log.error(`update operation map info ${mapInfo.name} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    if (!isCorrectURL(mapInfo.url)) {
+      log.error(`update operation map info ${mapInfo.url} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'update t_operation_map_info set name=?, url=?, modify_time = now() where id=?;';
+    query(sql, [mapInfo.name, mapInfo.url, id], (err, result) => {
+      if (err) {
+        log.error(`update operation map info error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'update operation map info error!'
+        });
+      } else {
+        log.info('update operation map info successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 删除运维地图详情
+  app.delete('/rest/mounionoperationservice/v1/operation-map-info/:id', (req, res) => {
+    log.info('delete operation info begin');
+    const id = req.params.id;
+    log.info(`delete operation info id is ${id}`);
+
+    if (!isCorrectId(id)) {
+      log.error(`delete operation info ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'update t_operation_map_info set status = 0 where id = ?;';
+    query(sql, [id], (err, result) => {
+      if (err) {
+        log.error(`delete operation info error ${err}`);
+        res.status(200).send({
+          resultCode: 'OC.000001',
+          resultData: 'delete operation info error!'
+        });
+      } else {
+        log.info('delete operation info successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: result });
+      }
+    });
+  });
+
+  // 全量查询om操作列表
+  app.get('/rest/mounionoperationservice/v1/operations', (req, res) => {
+    const sql = 'select t.id, t.name, t.description, t.type, t.is_global as isGlobal, t1.region, t1.url from t_operation t, t_operation_info t1 where t1.operation_id = t.id';
+    query(sql, [], (err, result) => {
+      if (err) {
+        log.error(`GET operation error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        const tempResult = {};
+        result.forEach((item) => {
+          if (tempResult[item.id] !== undefined) {
+            tempResult[item.id].urlList.push({
+              url: item.url,
+              regionId: item.region
+            });
+          } else {
+            tempResult[item.id] = {
+              id: item.id,
+              name: item.name,
+              desc: item.description,
+              type: item.type,
+              isGlobal: item.isGlobal,
+              urlList: [
+                {
+                  url: item.url,
+                  regionId: item.region
+                }
+              ]
+            };
+          }
+        });
+
+        const newResult = [];
+        _.forEach(tempResult, function (value) {
+          newResult.push(value);
+        });
+
+        log.info('GET operation successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: newResult});
+      }
+    });
+  });
+
+  // 根据id获取运维信息
+  app.get('/rest/mounionoperationservice/v1/operation/:id', (req, res) => {
+    log.info('get operation begin');
+    const id = req.params.id;
+
+    if (!isCorrectId(id)) {
+      log.error(`get operation ${id} failed, param is error.`);
+      res.status(200).send({ resultCode: 'OC.000002', resultData: {} });
+      return;
+    }
+
+    const sql = 'select t.id, t.name, t.description, t.type, t.is_global as isGlobal, t1.region, t1.url from t_operation t, t_operation_info t1 where t1.operation_id = t.id and t.id = ?';
+    query(sql, [id], (err, result) => {
+      if (err) {
+        log.error(`GET operation error ${err}`);
+        res.status(500).send({
+          resultCode: 'OC.000001',
+          resultData: 'query error!'
+        });
+      } else {
+        const tempResult = {};
+        result.forEach((item) => {
+          if (tempResult[item.id] !== undefined) {
+            tempResult[item.id].urlList.push({
+              url: item.url,
+              regionId: item.region
+            });
+          } else {
+            tempResult[item.id] = {
+              id: item.id,
+              name: item.name,
+              desc: item.description,
+              type: item.type,
+              isGlobal: item.isGlobal,
+              urlList: [
+                {
+                  url: item.url,
+                  regionId: item.region
+                }
+              ]
+            };
+          }
+        });
+
+        log.info('GET operation successfully');
+        res.status(200).send({ resultCode: 'OC.000000', resultData: tempResult[id]});
+      }
+    });
+  });
+}
+
+module.exports = main;
